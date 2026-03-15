@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>SOMOS · Bubble Shooter</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fredoka+One&display=swap');
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{width:100%;height:100%;overflow:hidden;background:#0a0820;user-select:none;}
+#app{display:flex;flex-direction:column;width:100%;height:100%;font-family:'Fredoka One',cursive;}
+
+#hud{
+  flex-shrink:0;display:flex;align-items:center;justify-content:space-between;
+  padding:4px 12px;background:rgba(10,8,32,0.97);border-bottom:2px solid #5533aa;
+  font-size:11px;letter-spacing:1px;
+}
+#hud .score{color:#ffdd00;font-size:13px;}
+#hud .title{color:#cc88ff;font-size:10px;letter-spacing:2px;}
+#hud .level{color:#88ffcc;font-size:11px;}
+
+#cw{flex:1;min-height:0;position:relative;overflow:hidden;}
+canvas{display:block;touch-action:none;outline:none;}
+
+#bot{
+  flex-shrink:0;display:flex;align-items:center;justify-content:space-between;
+  padding:5px 16px 6px;background:rgba(10,8,32,0.97);border-top:2px solid #5533aa;
+  gap:8px;
+}
+.ctrl-btn{
+  width:52px;height:44px;border-radius:10px;cursor:pointer;font-size:20px;
+  background:rgba(85,51,170,0.3);border:2px solid rgba(150,100,255,0.4);
+  color:#cc88ff;display:flex;align-items:center;justify-content:center;
+  -webkit-tap-highlight-color:transparent;touch-action:manipulation;
+}
+.ctrl-btn:active,.ctrl-btn.pressed{background:rgba(150,100,255,0.4);border-color:#cc88ff;}
+#fireBtn{
+  width:64px;height:64px;border-radius:50%;font-size:24px;
+  background:radial-gradient(circle,#ff6688,#cc1144);
+  border:3px solid #ff88aa;box-shadow:0 0 16px rgba(255,100,150,0.5);
+  color:#fff;cursor:pointer;-webkit-tap-highlight-color:transparent;
+}
+#fireBtn:active{transform:scale(0.93);box-shadow:0 0 8px rgba(255,100,150,0.3);}
+#nextBubble{
+  width:44px;height:44px;border-radius:50%;
+  background:rgba(20,15,50,0.8);border:2px solid rgba(150,100,255,0.4);
+  display:flex;align-items:center;justify-content:center;flex-direction:column;gap:1px;
+}
+#nextBubble span{font-size:7px;color:rgba(200,150,255,0.7);}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div class="level">LVL <span id="lvlEl">1</span></div>
+    <div class="title">🫧 BUBBLE SHOOTER</div>
+    <div class="score">⭐ <span id="scoreEl">0</span></div>
+  </div>
+  <div id="cw"><canvas id="c" tabindex="0"></canvas></div>
+  <div id="bot">
+    <button class="ctrl-btn" id="btnL">◀</button>
+    <div id="nextBubble"><canvas id="nextC" width="34" height="34"></canvas><span>NEXT</span></div>
+    <button id="fireBtn">🫧</button>
+    <button class="ctrl-btn" id="btnR">▶</button>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const cw     = document.getElementById('cw');
+const nextC  = document.getElementById('nextC');
+const nextX  = nextC.getContext('2d');
+
+let W, H;
+function resize(){
+  W = canvas.width  = cw.clientWidth;
+  H = canvas.height = cw.clientHeight;
+}
+window.addEventListener('load', ()=>{ setTimeout(()=>{ resize(); initGame(); }, 80); });
+window.addEventListener('resize', ()=>{ resize(); recalcLayout(); draw(); });
+
+// ── CONSTANTS ────────────────────────────────────────────
+const COLORS = [
+  '#ff3366','#ff8800','#ffdd00','#33cc44','#3388ff','#aa44ff','#ff44cc','#00ddcc'
+];
+const GLOW = [
+  '#ff6699','#ffaa33','#ffee55','#55dd66','#55aaff','#cc77ff','#ff77dd','#44ffee'
+];
+
+let R, COLS, ROWS_VISIBLE;
+let bubbles = []; // grid: bubbles[row][col] = {color} or null
+let shooter = { angle: -Math.PI/2, x: 0, y: 0, color: '', nextColor: '' };
+let bullet  = null; // flying bubble
+let particles = [];
+let score = 0, level = 1, combo = 0;
+let gameState = 'playing'; // playing|gameover|levelclear
+let aimLine = [];
+let stateTimer = 0;
+let gameInterval = null;
+
+const keys = {};
+
+function recalcLayout(){
+  COLS = Math.max(8, Math.floor(W / (Math.min(W,H)*0.092)));
+  if(COLS % 2 === 0) COLS = Math.max(8, COLS);
+  R    = (W / COLS) / 2;
+  ROWS_VISIBLE = Math.floor((H * 0.78) / (R * Math.sqrt(3)));
+  shooter.x = W / 2;
+  shooter.y = H - R * 2.5;
+}
+
+function randColor(){ return COLORS[Math.floor(Math.random() * (Math.min(COLORS.length, 4 + level)))]; }
+
+function initGame(){
+  recalcLayout();
+  score = 0; level = 1; gameState = 'playing';
+  document.getElementById('scoreEl').textContent = 0;
+  document.getElementById('lvlEl').textContent = 1;
+  buildGrid(5 + level);
+  shooter.color    = randColor();
+  shooter.nextColor= randColor();
+  shooter.angle    = -Math.PI/2;
+  bullet = null;
+  drawNextBubble();
+  startLoop();
+}
+
+function buildGrid(rows){
+  bubbles = [];
+  for(let r=0; r<rows; r++){
+    bubbles[r] = [];
+    const cols = (r%2===0) ? COLS : COLS-1;
+    for(let c=0; c<cols; c++){
+      bubbles[r][c] = { color: randColor() };
+    }
+  }
+}
+
+// ── GRID GEOMETRY ────────────────────────────────────────
+function bubbleXY(row, col){
+  const odd = row % 2 === 1;
+  const x   = R + col * R*2 + (odd ? R : 0);
+  const y   = R + row * R * Math.sqrt(3);
+  return { x, y };
+}
+
+function xyToGrid(x, y){
+  const row = Math.round((y - R) / (R * Math.sqrt(3)));
+  const odd = row % 2 === 1;
+  const col = Math.round((x - R - (odd ? R : 0)) / (R*2));
+  return { row, col };
+}
+
+function getNeighbors(row, col){
+  const odd = row % 2 === 1;
+  return [
+    [row-1, col+(odd?0:-1)], [row-1, col+(odd?1:0)],
+    [row,   col-1],          [row,   col+1],
+    [row+1, col+(odd?0:-1)], [row+1, col+(odd?1:0)],
+  ].filter(([r,c])=> r>=0 && r<bubbles.length && c>=0 && c<(bubbles[r]||[]).length && bubbles[r][c]);
+}
+
+// ── SHOOTING ─────────────────────────────────────────────
+function fire(){
+  if(bullet || gameState !== 'playing') return;
+  const speed = Math.min(W,H) * 0.022;
+  bullet = {
+    x: shooter.x, y: shooter.y,
+    vx: Math.cos(shooter.angle) * speed,
+    vy: Math.sin(shooter.angle) * speed,
+    color: shooter.color,
+    trail: [],
+  };
+  shooter.color     = shooter.nextColor;
+  shooter.nextColor = randColor();
+  drawNextBubble();
+}
+
+function updateAimLine(){
+  aimLine = [];
+  let x = shooter.x, y = shooter.y;
+  let vx = Math.cos(shooter.angle), vy = Math.sin(shooter.angle);
+  const step = R * 0.6;
+  for(let i=0; i<60; i++){
+    x += vx*step; y += vy*step;
+    if(x < R){ x = R; vx = -vx; }
+    if(x > W-R){ x = W-R; vx = -vx; }
+    aimLine.push({x,y});
+    if(y < R) break;
+  }
+}
+
+// ── PHYSICS UPDATE ───────────────────────────────────────
+function update(){
+  if(gameState !== 'playing'){
+    stateTimer--;
+    if(stateTimer <= 0){
+      if(gameState === 'levelclear'){ level++; document.getElementById('lvlEl').textContent=level; buildGrid(5+Math.min(level,8)); gameState='playing'; bullet=null; }
+      else if(gameState === 'gameover'){ initGame(); }
+    }
+    updateParticles(); return;
+  }
+
+  if(!bullet){ updateAimLine(); updateParticles(); return; }
+
+  // Trail
+  bullet.trail.push({x:bullet.x, y:bullet.y});
+  if(bullet.trail.length > 8) bullet.trail.shift();
+
+  bullet.x += bullet.vx;
+  bullet.y += bullet.vy;
+
+  // Wall bounce
+  if(bullet.x < R){ bullet.x = R; bullet.vx = -bullet.vx; }
+  if(bullet.x > W-R){ bullet.x = W-R; bullet.vx = -bullet.vx; }
+
+  // Top wall — stick
+  if(bullet.y < R){ snapBubble(0, Math.round((bullet.x - R)/(R*2))); return; }
+
+  // Collision with grid
+  for(let r=0; r<bubbles.length; r++){
+    for(let c=0; c<(bubbles[r]||[]).length; c++){
+      if(!bubbles[r][c]) continue;
+      const {x,y} = bubbleXY(r,c);
+      if(Math.hypot(bullet.x-x, bullet.y-y) < R*1.85){
+        snapBubble(r,c); return;
+      }
+    }
+  }
+
+  // Off bottom → miss
+  if(bullet.y > H){ bullet=null; }
+
+  updateParticles();
+}
+
+function snapBubble(hitRow, hitCol){
+  // Find best empty neighbor slot near collision
+  const candidates = [];
+  // Check neighbors of hit bubble
+  const checkSlot = (r,c)=>{
+    if(r<0||c<0) return;
+    if(!bubbles[r]) bubbles[r]=[];
+    const maxC = r%2===0?COLS:COLS-1;
+    if(c>=maxC) return;
+    if(!bubbles[r][c]) candidates.push({r,c,dist:Math.hypot(bullet.x-bubbleXY(r,c).x,bullet.y-bubbleXY(r,c).y)});
+  };
+  const odd = hitRow%2===1;
+  [
+    [hitRow-1,hitCol+(odd?0:-1)],[hitRow-1,hitCol+(odd?1:0)],
+    [hitRow,hitCol-1],[hitRow,hitCol+1],
+    [hitRow+1,hitCol+(odd?0:-1)],[hitRow+1,hitCol+(odd?1:0)],
+  ].forEach(([r,c])=>checkSlot(r,c));
+  // Also check top row
+  if(hitRow===0) checkSlot(0, Math.max(0,Math.min(COLS-1,Math.round((bullet.x-R)/(R*2)))));
+
+  if(!candidates.length){
+    // fallback: place in new row 0
+    const c = Math.max(0,Math.min(COLS-1,Math.round((bullet.x-R)/(R*2))));
+    if(!bubbles[0]) bubbles[0]=[];
+    if(!bubbles[0][c]) candidates.push({r:0,c,dist:0});
+  }
+
+  if(!candidates.length){ bullet=null; return; }
+  candidates.sort((a,b)=>a.dist-b.dist);
+  const {r,c} = candidates[0];
+  if(!bubbles[r]) bubbles[r]=[];
+  bubbles[r][c] = { color: bullet.color };
+  bullet = null;
+
+  // Find matches
+  const matched = findConnected(r,c,bullet?.color||bubbles[r][c].color);
+  if(matched.length >= 3){
+    combo++;
+    const pts = matched.length * 10 * combo;
+    score += pts;
+    document.getElementById('scoreEl').textContent = score;
+    matched.forEach(([mr,mc])=>{
+      const {x,y}=bubbleXY(mr,mc);
+      spawnPop(x,y,bubbles[mr][mc].color);
+      bubbles[mr][mc]=null;
+    });
+    // Drop floaters
+    dropFloaters();
+  } else { combo=0; }
+
+  // Push grid down if too many rows without clearing
+  if(bubbles.length > ROWS_VISIBLE + 2){
+    gameState='gameover'; stateTimer=80; return;
+  }
+
+  // Level clear
+  const anyLeft = bubbles.some(row=>row&&row.some(b=>b));
+  if(!anyLeft){ gameState='levelclear'; stateTimer=50; }
+}
+
+function findConnected(startR, startC, targetColor){
+  const color = bubbles[startR]?.[startC]?.color || targetColor;
+  const visited = new Set();
+  const result  = [];
+  const stack   = [[startR,startC]];
+  while(stack.length){
+    const [r,c]=stack.pop();
+    const key=`${r},${c}`;
+    if(visited.has(key)) continue;
+    visited.add(key);
+    if(!bubbles[r]||!bubbles[r][c]||bubbles[r][c].color!==color) continue;
+    result.push([r,c]);
+    getNeighbors(r,c).forEach(([nr,nc])=>stack.push([nr,nc]));
+  }
+  return result;
+}
+
+function dropFloaters(){
+  // BFS from top row to find all connected bubbles
+  const connected = new Set();
+  const queue = [];
+  for(let c=0;c<COLS;c++){
+    if(bubbles[0]&&bubbles[0][c]){ queue.push([0,c]); connected.add(`0,${c}`); }
+  }
+  while(queue.length){
+    const [r,c]=queue.shift();
+    getNeighbors(r,c).forEach(([nr,nc])=>{
+      const k=`${nr},${nc}`;
+      if(!connected.has(k)){ connected.add(k); queue.push([nr,nc]); }
+    });
+  }
+  // Drop all not connected
+  for(let r=0;r<bubbles.length;r++){
+    for(let c=0;c<(bubbles[r]||[]).length;c++){
+      if(bubbles[r][c]&&!connected.has(`${r},${c}`)){
+        const {x,y}=bubbleXY(r,c);
+        spawnDrop(x,y,bubbles[r][c].color);
+        bubbles[r][c]=null; score+=5;
+      }
+    }
+  }
+  document.getElementById('scoreEl').textContent=score;
+}
+
+// ── PARTICLES ────────────────────────────────────────────
+function spawnPop(x,y,color){
+  for(let i=0;i<12;i++){
+    const a=Math.random()*Math.PI*2, sp=2+Math.random()*5;
+    particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,r:3+Math.random()*4,life:20+Math.random()*15,maxLife:35,color,type:'pop'});
+  }
+}
+function spawnDrop(x,y,color){
+  for(let i=0;i<6;i++){
+    particles.push({x,y,vx:(Math.random()-0.5)*3,vy:-(1+Math.random()*3),r:2+Math.random()*3,life:25,maxLife:25,color,type:'drop'});
+  }
+}
+function updateParticles(){
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.x+=p.vx; p.y+=p.vy; p.life--;
+    if(p.type==='drop') p.vy+=0.25;
+    if(p.life<=0) particles.splice(i,1);
+  }
+}
+
+// ── INPUT ────────────────────────────────────────────────
+const TURN_SPEED = 0.04;
+
+// Buttons
+const setupBtn=(id,key)=>{
+  const btn=document.getElementById(id);
+  const on=()=>{keys[key]=true;btn.classList.add('pressed');};
+  const off=()=>{keys[key]=false;btn.classList.remove('pressed');};
+  btn.addEventListener('mousedown',on);btn.addEventListener('mouseup',off);btn.addEventListener('mouseleave',off);
+  btn.addEventListener('touchstart',e=>{e.preventDefault();on();},{passive:false});
+  btn.addEventListener('touchend',e=>{e.preventDefault();off();},{passive:false});
+  btn.addEventListener('touchcancel',e=>{e.preventDefault();off();},{passive:false});
+};
+setupBtn('btnL','left'); setupBtn('btnR','right');
+document.getElementById('fireBtn').addEventListener('click', fire);
+document.getElementById('fireBtn').addEventListener('touchstart',e=>{e.preventDefault();fire();},{passive:false});
+
+// Aim by touch/click on canvas
+canvas.addEventListener('click', e=>{
+  const r=canvas.getBoundingClientRect();
+  const mx=(e.clientX-r.left)*(W/r.width), my=(e.clientY-r.top)*(H/r.height);
+  shooter.angle=Math.atan2(my-shooter.y, mx-shooter.x);
+  // Clamp to upward
+  if(shooter.angle>-0.2) shooter.angle=-0.2;
+  if(shooter.angle<-Math.PI+0.2) shooter.angle=-Math.PI+0.2;
+  fire();
+});
+canvas.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  const r=canvas.getBoundingClientRect();
+  const mx=(e.touches[0].clientX-r.left)*(W/r.width), my=(e.touches[0].clientY-r.top)*(H/r.height);
+  shooter.angle=Math.atan2(my-shooter.y, mx-shooter.x);
+  if(shooter.angle>-0.2) shooter.angle=-0.2;
+  if(shooter.angle<-Math.PI+0.2) shooter.angle=-Math.PI+0.2;
+  fire();
+},{passive:false});
+
+// Keyboard
+document.addEventListener('keydown',e=>{
+  if(e.code==='ArrowLeft'||e.code==='KeyA'){e.preventDefault();keys.left=true;}
+  if(e.code==='ArrowRight'||e.code==='KeyD'){e.preventDefault();keys.right=true;}
+  if(e.code==='Space'||e.code==='ArrowUp'){e.preventDefault();fire();}
+});
+document.addEventListener('keyup',e=>{
+  if(e.code==='ArrowLeft'||e.code==='KeyA') keys.left=false;
+  if(e.code==='ArrowRight'||e.code==='KeyD') keys.right=false;
+});
+
+// ── DRAW ─────────────────────────────────────────────────
+function drawBubble(c,x,y,r,alpha=1,highlight=true){
+  const colorIdx=COLORS.indexOf(c);
+  const glowC=colorIdx>=0?GLOW[colorIdx]:c;
+
+  // Shadow
+  c2.globalAlpha=alpha*0.4;
+  c2.fillStyle='rgba(0,0,0,0.4)';
+  c2.beginPath();c2.arc(x+r*0.15,y+r*0.2,r*0.9,0,Math.PI*2);c2.fill();
+
+  c2.globalAlpha=alpha;
+  // Glow
+  c2.shadowColor=glowC; c2.shadowBlur=r*1.2;
+  // Gradient
+  const g=c2.createRadialGradient(x-r*0.35,y-r*0.38,r*0.05,x,y,r);
+  g.addColorStop(0,'rgba(255,255,255,0.85)');
+  g.addColorStop(0.25,c);
+  g.addColorStop(0.7,glowC);
+  g.addColorStop(1,darken(c,60));
+  c2.fillStyle=g;
+  c2.beginPath();c2.arc(x,y,r*0.92,0,Math.PI*2);c2.fill();
+  c2.shadowBlur=0;
+
+  if(highlight){
+    // Specular
+    const sh=c2.createRadialGradient(x-r*0.3,y-r*0.35,0,x-r*0.3,y-r*0.35,r*0.5);
+    sh.addColorStop(0,'rgba(255,255,255,0.75)');sh.addColorStop(1,'rgba(255,255,255,0)');
+    c2.fillStyle=sh;
+    c2.beginPath();c2.arc(x,y,r*0.92,0,Math.PI*2);c2.fill();
+  }
+  c2.globalAlpha=1;
+}
+
+// Use offscreen for compositing
+let offscreen, c2;
+function ensureOffscreen(){
+  if(!offscreen||offscreen.width!==W||offscreen.height!==H){
+    offscreen=document.createElement('canvas'); offscreen.width=W; offscreen.height=H;
+    c2=offscreen.getContext('2d');
+  }
+}
+
+function draw(){
+  ensureOffscreen();
+  // BG
+  const bg=c2.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#0a0820');bg.addColorStop(1,'#180a38');
+  c2.fillStyle=bg; c2.fillRect(0,0,W,H);
+
+  // Stars bg
+  c2.fillStyle='rgba(255,255,255,0.6)';
+  for(let i=0;i<40;i++){
+    const sx=Math.sin(i*1.9)*W*0.5+W*0.5, sy=Math.cos(i*2.7)*H*0.4+H*0.3;
+    c2.beginPath();c2.arc(sx,sy,0.7,0,Math.PI*2);c2.fill();
+  }
+
+  // Danger line
+  const dangerY = R + (ROWS_VISIBLE) * R * Math.sqrt(3);
+  c2.strokeStyle='rgba(255,50,50,0.3)';c2.lineWidth=1;c2.setLineDash([6,6]);
+  c2.beginPath();c2.moveTo(0,dangerY);c2.lineTo(W,dangerY);c2.stroke();
+  c2.setLineDash([]);
+
+  // Grid bubbles
+  for(let r=0;r<bubbles.length;r++){
+    for(let c=0;c<(bubbles[r]||[]).length;c++){
+      if(!bubbles[r][c]) continue;
+      const {x,y}=bubbleXY(r,c);
+      drawBubble(bubbles[r][c].color,x,y,R);
+    }
+  }
+
+  // Aim line (dashed dots)
+  if(!bullet && gameState==='playing'){
+    aimLine.forEach((p,i)=>{
+      if(i%3!==0) return;
+      const alpha=0.7-i/aimLine.length*0.65;
+      c2.globalAlpha=alpha;
+      c2.fillStyle='rgba(255,255,255,0.8)';
+      c2.beginPath();c2.arc(p.x,p.y,R*0.18,0,Math.PI*2);c2.fill();
+    });
+    c2.globalAlpha=1;
+  }
+
+  // Bullet
+  if(bullet){
+    // Trail
+    bullet.trail.forEach((t,i)=>{
+      const a=(i/bullet.trail.length)*0.35;
+      drawBubble(bullet.color,t.x,t.y,R*(0.3+i/bullet.trail.length*0.7),a,false);
+    });
+    drawBubble(bullet.color,bullet.x,bullet.y,R);
+  }
+
+  // Shooter
+  drawShooter();
+
+  // Particles
+  particles.forEach(p=>{
+    c2.globalAlpha=p.life/p.maxLife;
+    c2.shadowColor=p.color;c2.shadowBlur=6;
+    c2.fillStyle=p.color;
+    c2.beginPath();c2.arc(p.x,p.y,p.r*(p.life/p.maxLife),0,Math.PI*2);c2.fill();
+    c2.shadowBlur=0;
+  });
+  c2.globalAlpha=1;
+
+  // Overlays
+  if(gameState==='levelclear') drawMsg('🎉 NIVEL COMPLETADO!','#ffdd00','#aa8800');
+  else if(gameState==='gameover') drawMsg('💀 GAME OVER','#ff4444','#880000');
+
+  ctx.drawImage(offscreen,0,0);
+}
+
+function drawShooter(){
+  // Base platform
+  const g=c2.createLinearGradient(shooter.x-R*2,shooter.y,shooter.x+R*2,shooter.y+R*1.2);
+  g.addColorStop(0,'#1a0a3a');g.addColorStop(0.5,'#3a1a6a');g.addColorStop(1,'#1a0a3a');
+  c2.fillStyle=g;
+  c2.beginPath();c2.roundRect(shooter.x-R*2,shooter.y+R*0.5,R*4,R*1.2,R*0.4);c2.fill();
+  c2.strokeStyle='rgba(150,100,255,0.5)';c2.lineWidth=1.5;
+  c2.beginPath();c2.roundRect(shooter.x-R*2,shooter.y+R*0.5,R*4,R*1.2,R*0.4);c2.stroke();
+
+  // Barrel
+  const bx=shooter.x+Math.cos(shooter.angle)*R*1.5;
+  const by=shooter.y+Math.sin(shooter.angle)*R*1.5;
+  c2.strokeStyle='rgba(200,150,255,0.8)';c2.lineWidth=R*0.55;c2.lineCap='round';
+  c2.shadowColor='#aa66ff';c2.shadowBlur=8;
+  c2.beginPath();c2.moveTo(shooter.x,shooter.y);c2.lineTo(bx,by);c2.stroke();
+  c2.shadowBlur=0;
+
+  // Current bubble on shooter
+  drawBubble(shooter.color,shooter.x,shooter.y,R*0.92);
+}
+
+function drawMsg(txt,col,shadow){
+  c2.fillStyle='rgba(0,0,0,0.7)';c2.fillRect(0,H*0.3,W,H*0.25);
+  c2.fillStyle=col;c2.shadowColor=shadow;c2.shadowBlur=20;
+  c2.font=`bold ${Math.max(16,W/12)}px 'Fredoka One',cursive`;
+  c2.textAlign='center';c2.textBaseline='middle';
+  c2.fillText(txt,W/2,H*0.42);
+  c2.shadowBlur=0;
+  c2.fillStyle='rgba(255,255,255,0.6)';
+  c2.font=`${Math.max(10,W/22)}px 'Fredoka One',cursive`;
+  c2.fillText('SCORE: '+score,W/2,H*0.5);
+  c2.textAlign='left';c2.textBaseline='alphabetic';
+}
+
+function drawNextBubble(){
+  nextX.clearRect(0,0,34,34);
+  const g=nextX.createRadialGradient(12,11,1,17,17,16);
+  g.addColorStop(0,'rgba(255,255,255,0.8)');
+  g.addColorStop(0.3,shooter.nextColor);
+  g.addColorStop(1,darken(shooter.nextColor,60));
+  const colorIdx=COLORS.indexOf(shooter.nextColor);
+  const glowC=colorIdx>=0?GLOW[colorIdx]:shooter.nextColor;
+  nextX.shadowColor=glowC;nextX.shadowBlur=8;
+  nextX.fillStyle=g;
+  nextX.beginPath();nextX.arc(17,17,14,0,Math.PI*2);nextX.fill();
+  nextX.shadowBlur=0;
+  const sh=nextX.createRadialGradient(11,10,0,11,10,8);
+  sh.addColorStop(0,'rgba(255,255,255,0.7)');sh.addColorStop(1,'rgba(255,255,255,0)');
+  nextX.fillStyle=sh;nextX.beginPath();nextX.arc(17,17,14,0,Math.PI*2);nextX.fill();
+}
+
+// ── MAIN LOOP ────────────────────────────────────────────
+function startLoop(){ clearInterval(gameInterval); gameInterval=setInterval(tick,16); }
+function tick(){
+  // Key input
+  if(keys.left){  shooter.angle=Math.max(-Math.PI+0.15,shooter.angle-TURN_SPEED); }
+  if(keys.right){ shooter.angle=Math.min(-0.15,shooter.angle+TURN_SPEED); }
+  update();
+  draw();
+}
+
+// ── UTILS ────────────────────────────────────────────────
+function darken(hex,amt){
+  // Works with both hex and rgb
+  let r,g,b;
+  if(hex.startsWith('#')){
+    const n=parseInt(hex.replace('#',''),16);
+    r=(n>>16)&255;g=(n>>8)&255;b=n&255;
+  } else {
+    [r,g,b]=hex.match(/\d+/g).map(Number);
+  }
+  return `rgb(${Math.max(0,r-amt)},${Math.max(0,g-amt)},${Math.max(0,b-amt)})`;
+}
+</script>
+</body>
+</html>
